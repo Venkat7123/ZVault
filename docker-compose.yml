@@ -1,0 +1,30 @@
+# Bots Bank gateway on IBM LinuxONE.
+#
+# network_mode: host is deliberate. Db2's trusted context only lets AIGW switch users when the
+# connection comes from 172.17.0.1 (the Docker host address). A bridge-network container would
+# arrive from another address and Db2 would refuse the switch. With host networking the gateway
+# reaches Db2 (127.0.0.1:50000) and Granite (127.0.0.1:8080) exactly like the systemd version,
+# which is also why Db2 and Granite stay private: only the gateway port is published.
+#
+# Secrets come from ~/.botsbank_env (never in the image, never in Git).
+services:
+  gateway:
+    build: .
+    image: botsbank-gateway:latest
+    container_name: botsbank-gateway
+    network_mode: host
+    env_file:
+      - ${BOTSBANK_ENV_FILE:-/home/linux1/.botsbank_env}
+    environment:
+      PORT: ${PUBLIC_PORT:-8000}      # the ONE public port (0.0.0.0:PORT)
+      PUBLIC_MODE: "1"                # hides /docs and /openapi.json
+      DB_HOST: 127.0.0.1
+      LLM_URL: http://127.0.0.1:8080/v1/chat/completions
+    restart: unless-stopped           # comes back after a crash or a Docker restart
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL

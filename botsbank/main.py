@@ -1,0 +1,253 @@
+"""
+main.py - Bots Bank secure AI gateway (FastAPI).
+
+Flow for /ask:
+  token -> Granite picks a read-only tool -> rule check -> AI intent check
+  -> Db2 trusted connection switched to the real employee
+  -> Db2 row rules + column masks -> answer -> audit log
+
+Run:
+  uvicorn botsbank.main:app --host 127.0.0.1 --port 8000
+"""
+import os
+import re
+import threading
+import time
+from collections import deque
+from pathlib import Path
+
+import jwt
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi.responses import FileResponse, JSONResponse
+from pydantic import BaseModel, Field
+
+from . import auth, db, guard, llm
+from .tools import TOOLS, ToolError, build_query, extract_args
+
+# PUBLIC_MODE=1 when the site is reachable from the internet: hides /docs.
+PUBLIC_MODE = os.getenv("PUBLIC_MODE", "0") == "1"
+
+app = FastAPI(title="Bots Bank Secure AI Gateway",
+              redirect_slashes=False,  # "/signin/" is a 404, not a redirect
+              docs_url=None if PUBLIC_MODE else "/docs", redoc_url=None,
+              openapi_url=None if PUBLIC_MODE else "/openapi.json")
+
+# ---------- Abuse limits (in memory, per gateway process) ----------
+LOGIN_FAILS_PER_USER = 5      # per 5 minutes
+LOGIN_FAILS_TOTAL = 30        # per 5 minutes, all users together
+ASKS_PER_USER = 10            # per minute
+LLM_WAIT_SECONDS = 120        # Granite answers one question at a time
+
+_hits: dict[str, deque] = {}
+_hits_lock = threading.Lock()
+_llm_slot = threading.Semaphore(1)
+
+
+def _count(key: str, window: int, add: bool = False) -> int:
+    """Number of events for key in the last window seconds (optionally record one)."""
+    now = time.time()
+    with _hits_lock:
+        q = _hits.setdefault(key, deque())
+        while q and q[0] < now - window:
+            q.popleft()
+        if add:
+            q.append(now)
+        return len(q)
+
+# Old plain page (kept at /legacy until the React app is proven on the server).
+STATIC = Path(__file__).parent / "static"
+STATIC_FILES = {"app.css": "text/css", "app.js": "text/javascript"}
+
+# React app (frontend/ -> `npm run build` writes botsbank/dist).
+DIST = Path(__file__).parent / "dist"
+PAGE_ROUTES = ("/", "/signin", "/assistant", "/how-it-works", "/limits")
+ASSET_NAME = re.compile(r"^[A-Za-z0-9._-]{1,100}$")
+ASSET_TYPES = {".js": "text/javascript", ".css": "text/css", ".woff2": "font/woff2",
+               ".woff": "font/woff", ".svg": "image/svg+xml", ".png": "image/png"}
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Cache-Control"] = "no-store"
+    # /docs (FastAPI's test page) loads its own scripts; everything else is locked down.
+    if not request.url.path.startswith(("/docs", "/openapi.json")):
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self'; script-src 'self'; style-src 'self'; "
+            "img-src 'self' data:; frame-ancestors 'none'; form-action 'self'")
+    return response
+
+
+def web_page():
+    """index.html for "/" and the four page routes only; every other path is a 404."""
+    index = DIST / "index.html"
+    if index.is_file():
+        return FileResponse(index, media_type="text/html")
+    raise HTTPException(404)
+
+
+for _path in PAGE_ROUTES:
+    app.add_api_route(_path, web_page, methods=["GET"], include_in_schema=False)
+
+
+@app.get("/assets/{name}", include_in_schema=False)
+def asset_file(name: str):
+    # Plain file names with a known type, inside dist/assets only.
+    suffix = Path(name).suffix
+    path = DIST / "assets" / name
+    if not ASSET_NAME.match(name) or suffix not in ASSET_TYPES or not path.is_file():
+        raise HTTPException(404)
+    return FileResponse(path, media_type=ASSET_TYPES[suffix])
+
+
+@app.get("/legacy", include_in_schema=False)
+def legacy_page():
+    return FileResponse(STATIC / "index.html", media_type="text/html")
+
+
+@app.get("/static/{name}", include_in_schema=False)
+def static_file(name: str):
+    # Only the two known files; no path from the request reaches the disk.
+    if name not in STATIC_FILES:
+        raise HTTPException(404)
+    return FileResponse(STATIC / name, media_type=STATIC_FILES[name])
+
+
+class LoginRequest(BaseModel):
+    user_id: str = Field(max_length=30)
+    password: str = Field(max_length=100)
+
+
+class AskRequest(BaseModel):
+    question: str = Field(min_length=3, max_length=500)
+
+
+def current_user(authorization: str = Header(default="")) -> dict:
+    if not authorization.startswith("Bearer "):
+        raise HTTPException(401, "Missing token")
+    try:
+        return auth.verify(authorization.removeprefix("Bearer ").strip())
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(401, "Token expired, please log in again") from None
+    except jwt.InvalidTokenError:
+        raise HTTPException(401, "Invalid token") from None
+
+
+@app.get("/me")
+def me(user: dict = Depends(current_user)):
+    """Who the verified token says you are. Reads the token only: no Db2, no Granite."""
+    return {"sub": user["sub"], "role": user.get("role"),
+            "branch": user.get("branch"), "exp": user.get("exp")}
+
+
+@app.get("/health")
+def health():
+    return {"status": "ok", "db": db.ping(), "llm": llm.ping()}
+
+
+@app.post("/login")
+def login(req: LoginRequest):
+    user_id = req.user_id.strip().upper()[:30] or "UNKNOWN"
+    if (_count(f"fail:{user_id}", 300) >= LOGIN_FAILS_PER_USER
+            or _count("fail:*", 300) >= LOGIN_FAILS_TOTAL):
+        db.write_log(user_id, "login", "BLOCK", None, "too many failed sign-ins")
+        raise HTTPException(429, "Too many failed sign-ins. Try again in 5 minutes.")
+    token = auth.login(req.user_id, req.password)
+    if not token:
+        _count(f"fail:{user_id}", 300, add=True)
+        _count("fail:*", 300, add=True)
+        db.write_log(user_id, "login", "BLOCK", None, "bad credentials")
+        raise HTTPException(401, "Invalid user or password")
+    return {"token": token, "expires_in_minutes": auth.TOKEN_MINUTES}
+
+
+def _blocked(user_id: str, tool: str, reason: str, stage: str) -> dict:
+    """stage = which layer stopped it: guard | intent | tool | db2 | volume."""
+    db.write_log(user_id, tool, "BLOCK", None, reason)
+    return {"decision": "BLOCKED", "tool": tool, "reason": reason, "stage": stage,
+            "rows": [], "answer": f"Request blocked: {reason}."}
+
+
+def _answer(tool: str, args: dict, rows: list[dict]) -> str:
+    if tool in {"get_customer", "customer_loans"} and not rows:
+        return f"No records for customer {args.get('cust_id')} in the data you are allowed to see."
+    if not rows:
+        return "No matching records in the data you are allowed to see."
+    noun = "row" if len(rows) == 1 else "rows"
+    return f"Found {len(rows)} {noun} you are allowed to see."
+
+
+@app.post("/ask")
+def ask(req: AskRequest, user: dict = Depends(current_user)):
+    user_id = user["sub"]
+    if _count(f"ask:{user_id}", 60, add=True) > ASKS_PER_USER:
+        db.write_log(user_id, "ask", "BLOCK", None, "too many questions per minute")
+        raise HTTPException(429, "Too many questions. Please wait a minute.")
+    # Granite runs on 3 CPUs: one question at a time, others wait in line.
+    if not _llm_slot.acquire(timeout=LLM_WAIT_SECONDS):
+        raise HTTPException(503, "The assistant is busy. Please try again shortly.")
+    try:
+        return _ask(user_id, req.question.strip())
+    finally:
+        _llm_slot.release()
+
+
+def _ask(user_id: str, question: str) -> dict:
+
+    # 1. Granite chooses ONE read-only tool (it never writes SQL).
+    try:
+        choice = llm.choose_tool(question)
+    except RuntimeError as exc:
+        db.write_log(user_id, "route", "ERROR", None, str(exc))
+        raise HTTPException(503, "AI model unavailable") from None
+    tool = choice.get("tool", "none")
+    # Values come from plain code, never from the AI.
+    args = extract_args(question, tool)
+
+    # 2. Predictable rules (block only).
+    allowed, reason = guard.check(question, tool, args)
+    if not allowed:
+        return _blocked(user_id, tool, reason, "guard")
+
+    # 3. AI intent check (block only).
+    if not llm.intent_check(question, tool, args):
+        return _blocked(user_id, tool, "AI intent check: request does not match the question", "intent")
+
+    # 4. Fixed SQL + validated parameters.
+    try:
+        sql, params = build_query(tool, args)
+    except ToolError as exc:
+        return _blocked(user_id, tool, str(exc), "tool")
+
+    # 5. Db2 runs it AS the employee: row rules and masks apply here.
+    try:
+        rows = db.run_as(user_id, sql, params)
+    except db.AccessDenied:
+        return _blocked(user_id, tool, "Db2 denied access for this employee", "db2")
+
+    # 6. Volume rule: more rows than this tool should ever return.
+    if len(rows) > TOOLS[tool]["max_rows"]:
+        return _blocked(user_id, tool, f"returned more than {TOOLS[tool]['max_rows']} rows", "volume")
+
+    db.write_log(user_id, tool, "ALLOW", len(rows), f"args={args}")
+    return {"decision": "ALLOWED", "tool": tool, "args": args, "stage": None,
+            "answer": _answer(tool, args, rows), "rows": rows}
+
+
+@app.get("/logs")
+def logs(user: dict = Depends(current_user)):
+    """Staff cannot read the audit log through the gateway. Db2 refuses it
+    (only the AUDITOR role may SELECT it), and auditors use read_audit_log.py
+    directly instead of the AI."""
+    try:
+        db.run_as(user["sub"],
+                  "SELECT LOG_ID FROM BANK.ACCESS_LOG FETCH FIRST 1 ROWS ONLY")
+    except db.AccessDenied:
+        db.write_log(user["sub"], "read_logs", "BLOCK", None, "Db2 denied log access")
+        return JSONResponse(
+            {"detail": "Db2 denied: only auditors can read the audit log, "
+                       "directly and not through the AI", "stage": "db2"},
+            status_code=403)
+    raise HTTPException(500, "Unexpected: Db2 allowed log access; check grants")

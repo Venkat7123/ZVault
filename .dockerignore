@@ -1,0 +1,10 @@
+.git
+.env
+*.pem
+**/__pycache__
+**/*.pyc
+sql
+tests
+deploy
+*.sh
+_old

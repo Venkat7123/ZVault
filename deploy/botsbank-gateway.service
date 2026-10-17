@@ -1,0 +1,20 @@
+# /etc/systemd/system/botsbank-gateway.service
+# Bots Bank secure AI gateway (FastAPI), local only (127.0.0.1:8000).
+# Secrets come from ~/.botsbank_env, loaded by start_gateway.sh.
+[Unit]
+Description=Bots Bank - secure AI gateway
+After=network.target docker.service botsbank-llm.service
+Wants=botsbank-llm.service
+
+[Service]
+User=linux1
+WorkingDirectory=/home/linux1/botsbank-project
+ExecStart=/home/linux1/botsbank-project/start_gateway.sh
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target

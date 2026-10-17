@@ -1,0 +1,27 @@
+# ---- Secrets: never commit ----
+*.pem
+*.key
+.env
+.env.*
+.botsbank_env
+.botsbank_alerts_env
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# ---- Frontend ----
+frontend/node_modules/
+frontend/*.tsbuildinfo
+# Build output: rebuild with `cd frontend && npm install && npm run build` (writes botsbank/dist)
+botsbank/dist/
+
+# ---- Editors / OS ----
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.log

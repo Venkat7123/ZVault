@@ -1,0 +1,18 @@
+# /etc/systemd/system/botsbank-llm.service
+# IBM Granite 3.3 2B served by llama.cpp, local only (127.0.0.1:8080).
+[Unit]
+Description=Bots Bank - IBM Granite model (llama.cpp)
+After=network.target
+
+[Service]
+User=linux1
+ExecStart=/home/linux1/llama.cpp/build/bin/llama-server -m /home/linux1/models/granite-3.3-2b-instruct-Q8_0.gguf --host 127.0.0.1 --port 8080 -c 4096 -t 3
+Restart=on-failure
+RestartSec=5
+# Basic hardening: no privilege gain, private /tmp, system folders read-only.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target
