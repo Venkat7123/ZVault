@@ -80,19 +80,38 @@ def run_as(user_id: str, sql: str, params: tuple = ()) -> list[dict]:
         ibm_db.close(conn)
 
 
+# True until Db2 says ACCESS_LOG has no CLIENT_IP column (sql/07_alerts.sql not run yet).
+_LOG_HAS_IP = True
+
+
 def write_log(emp_id: str, action: str, decision: str,
-              rows_returned: int | None, reason: str) -> None:
+              rows_returned: int | None, reason: str, client_ip: str | None = None) -> None:
     """Append one audit record. AIGW may only INSERT into the log."""
+    global _LOG_HAS_IP
     try:
         conn = ibm_db.connect(_dsn(), "", "")
         try:
+            values = (emp_id[:30], action[:30], decision[:10], rows_returned, reason[:500])
+            if _LOG_HAS_IP:
+                try:
+                    stmt = ibm_db.prepare(
+                        conn,
+                        "INSERT INTO BANK.ACCESS_LOG "
+                        "(EMP_ID, ACTION, DECISION, ROWS_RETURNED, REASON, CLIENT_IP) "
+                        "VALUES (?, ?, ?, ?, ?, ?)",
+                    )
+                    ibm_db.execute(stmt, values + ((client_ip or "")[:45] or None,))
+                    return
+                except Exception as exc:  # noqa: BLE001
+                    if "SQL0206N" not in str(exc):  # anything but "no such column"
+                        raise
+                    _LOG_HAS_IP = False
             stmt = ibm_db.prepare(
                 conn,
                 "INSERT INTO BANK.ACCESS_LOG (EMP_ID, ACTION, DECISION, ROWS_RETURNED, REASON) "
                 "VALUES (?, ?, ?, ?, ?)",
             )
-            ibm_db.execute(stmt, (emp_id, action[:30], decision[:10],
-                                  rows_returned, reason[:500]))
+            ibm_db.execute(stmt, values)
         finally:
             ibm_db.close(conn)
     except Exception as exc:  # noqa: BLE001 - never crash a request on logging

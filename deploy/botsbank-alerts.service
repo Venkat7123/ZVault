@@ -1,0 +1,19 @@
+# /etc/systemd/system/botsbank-alerts.service
+# ZVault suspicious-access alert engine. Reads BANK.ACCESS_LOG, writes BANK.ALERTS
+# as the Db2 user ALERTSVC (no customer data). Secrets: ~/.botsbank_alerts_env.
+[Unit]
+Description=ZVault - suspicious-access alert engine
+After=network.target docker.service botsbank-llm.service
+
+[Service]
+User=linux1
+WorkingDirectory=/home/linux1/botsbank-project
+ExecStart=/home/linux1/botsbank-project/start_alerts.sh
+Restart=on-failure
+RestartSec=10
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,45 @@
+-- 07_alerts.sql
+-- Suspicious-access alerts (P3). Run ONCE as DB2INST1 (the table owner).
+-- Needs the OS user "alertsvc" inside the db2 container first (see the steps you were given).
+--
+-- Least privilege:
+--   ALERTSVC (the alert engine) : CONNECT, read ACCESS_LOG, write ALERTS. NO customer data.
+--   AUDITOR role                : read ALERTS, mark them REVIEWED (STATUS only).
+--   AIGW and staff roles        : nothing on ALERTS.
+
+-- 1. Client address in the audit log (the gateway fills it; old rows stay NULL)
+ALTER TABLE BANK.ACCESS_LOG ADD COLUMN CLIENT_IP VARCHAR(45);
+CREATE INDEX BANK.IX_ACCESS_LOG_TIME ON BANK.ACCESS_LOG (EVENT_TIME);
+
+-- 2. The alerts table. One row per ongoing incident (DEDUPE_KEY), updated while it lasts.
+CREATE TABLE BANK.ALERTS (
+  ALERT_ID         BIGINT NOT NULL GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  CREATED_AT       TIMESTAMP NOT NULL DEFAULT CURRENT TIMESTAMP,
+  UPDATED_AT       TIMESTAMP NOT NULL DEFAULT CURRENT TIMESTAMP,
+  RULE_ID          VARCHAR(40) NOT NULL,
+  SEVERITY         VARCHAR(10) NOT NULL,
+  SUBJECT          VARCHAR(60) NOT NULL,
+  WINDOW_START     TIMESTAMP NOT NULL,
+  WINDOW_END       TIMESTAMP NOT NULL,
+  EVENT_COUNT      INTEGER NOT NULL,
+  EVIDENCE_LOG_IDS VARCHAR(1000),
+  SUMMARY          VARCHAR(600) NOT NULL,
+  SUMMARY_BY       VARCHAR(10) NOT NULL,
+  STATUS           VARCHAR(10) NOT NULL DEFAULT 'OPEN',
+  DEDUPE_KEY       VARCHAR(160) NOT NULL,
+  CONSTRAINT UQ_ALERTS_DEDUPE UNIQUE (DEDUPE_KEY),
+  CONSTRAINT CK_ALERTS_SEVERITY CHECK (SEVERITY IN ('LOW', 'MEDIUM', 'HIGH')),
+  CONSTRAINT CK_ALERTS_STATUS CHECK (STATUS IN ('OPEN', 'REVIEWED'))
+);
+
+-- 3. The alert engine's own Db2 user: no access to CUSTOMERS, LOANS or EMPLOYEES.
+--    (If this GRANT CONNECT fails with SQL0551N, run just this line connected as secadm1.)
+GRANT CONNECT ON DATABASE TO USER ALERTSVC;
+GRANT SELECT ON BANK.ACCESS_LOG TO USER ALERTSVC;
+GRANT SELECT, INSERT ON BANK.ALERTS TO USER ALERTSVC;
+GRANT UPDATE (UPDATED_AT, SEVERITY, WINDOW_END, EVENT_COUNT, EVIDENCE_LOG_IDS, SUMMARY, SUMMARY_BY)
+  ON BANK.ALERTS TO USER ALERTSVC;
+
+-- 4. Auditors read alerts directly in Db2 (never through the AI) and can mark them reviewed.
+GRANT SELECT ON BANK.ALERTS TO ROLE AUDITOR;
+GRANT UPDATE (STATUS) ON BANK.ALERTS TO ROLE AUDITOR;

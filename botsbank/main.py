@@ -37,6 +37,7 @@ LOGIN_FAILS_PER_USER = 5      # per 5 minutes
 LOGIN_FAILS_TOTAL = 30        # per 5 minutes, all users together
 ASKS_PER_USER = 10            # per minute
 LLM_WAIT_SECONDS = 120        # Granite answers one question at a time
+TOKEN_FAIL_LOGS = 60          # max bad-token log rows per minute (stops log flooding)
 
 _hits: dict[str, deque] = {}
 _hits_lock = threading.Lock()
@@ -124,15 +125,29 @@ class AskRequest(BaseModel):
     question: str = Field(min_length=3, max_length=500)
 
 
-def current_user(authorization: str = Header(default="")) -> dict:
+def client_ip(request: Request) -> str | None:
+    """The connecting address. X-Forwarded-For is ignored: there is no trusted proxy in front."""
+    return request.client.host if request.client else None
+
+
+def _token_refused(request: Request, reason: str, message: str):
+    # The token's own user name is not trusted (it failed checks), so the row says UNKNOWN.
+    if _count("tokfail:*", 60, add=True) <= TOKEN_FAIL_LOGS:
+        db.write_log("UNKNOWN", "token", "BLOCK", None, reason, client_ip(request))
+    raise HTTPException(401, message)
+
+
+def current_user(request: Request, authorization: str = Header(default="")) -> dict:
     if not authorization.startswith("Bearer "):
         raise HTTPException(401, "Missing token")
     try:
-        return auth.verify(authorization.removeprefix("Bearer ").strip())
+        user = auth.verify(authorization.removeprefix("Bearer ").strip())
     except jwt.ExpiredSignatureError:
-        raise HTTPException(401, "Token expired, please log in again") from None
+        _token_refused(request, "expired token", "Token expired, please log in again")
     except jwt.InvalidTokenError:
-        raise HTTPException(401, "Invalid token") from None
+        _token_refused(request, "invalid token", "Invalid token")
+    user["_ip"] = client_ip(request)
+    return user
 
 
 @app.get("/me")
@@ -148,24 +163,25 @@ def health():
 
 
 @app.post("/login")
-def login(req: LoginRequest):
+def login(req: LoginRequest, request: Request):
     user_id = req.user_id.strip().upper()[:30] or "UNKNOWN"
+    ip = client_ip(request)
     if (_count(f"fail:{user_id}", 300) >= LOGIN_FAILS_PER_USER
             or _count("fail:*", 300) >= LOGIN_FAILS_TOTAL):
-        db.write_log(user_id, "login", "BLOCK", None, "too many failed sign-ins")
+        db.write_log(user_id, "login", "BLOCK", None, "too many failed sign-ins", ip)
         raise HTTPException(429, "Too many failed sign-ins. Try again in 5 minutes.")
     token = auth.login(req.user_id, req.password)
     if not token:
         _count(f"fail:{user_id}", 300, add=True)
         _count("fail:*", 300, add=True)
-        db.write_log(user_id, "login", "BLOCK", None, "bad credentials")
+        db.write_log(user_id, "login", "BLOCK", None, "bad credentials", ip)
         raise HTTPException(401, "Invalid user or password")
     return {"token": token, "expires_in_minutes": auth.TOKEN_MINUTES}
 
 
-def _blocked(user_id: str, tool: str, reason: str, stage: str) -> dict:
+def _blocked(user_id: str, tool: str, reason: str, stage: str, ip: str | None = None) -> dict:
     """stage = which layer stopped it: guard | intent | tool | db2 | volume."""
-    db.write_log(user_id, tool, "BLOCK", None, reason)
+    db.write_log(user_id, tool, "BLOCK", None, reason, ip)
     return {"decision": "BLOCKED", "tool": tool, "reason": reason, "stage": stage,
             "rows": [], "answer": f"Request blocked: {reason}."}
 
@@ -181,26 +197,26 @@ def _answer(tool: str, args: dict, rows: list[dict]) -> str:
 
 @app.post("/ask")
 def ask(req: AskRequest, user: dict = Depends(current_user)):
-    user_id = user["sub"]
+    user_id, ip = user["sub"], user.get("_ip")
     if _count(f"ask:{user_id}", 60, add=True) > ASKS_PER_USER:
-        db.write_log(user_id, "ask", "BLOCK", None, "too many questions per minute")
+        db.write_log(user_id, "ask", "BLOCK", None, "too many questions per minute", ip)
         raise HTTPException(429, "Too many questions. Please wait a minute.")
     # Granite runs on 3 CPUs: one question at a time, others wait in line.
     if not _llm_slot.acquire(timeout=LLM_WAIT_SECONDS):
         raise HTTPException(503, "The assistant is busy. Please try again shortly.")
     try:
-        return _ask(user_id, req.question.strip())
+        return _ask(user_id, req.question.strip(), ip)
     finally:
         _llm_slot.release()
 
 
-def _ask(user_id: str, question: str) -> dict:
+def _ask(user_id: str, question: str, ip: str | None = None) -> dict:
 
     # 1. Granite chooses ONE read-only tool (it never writes SQL).
     try:
         choice = llm.choose_tool(question)
     except RuntimeError as exc:
-        db.write_log(user_id, "route", "ERROR", None, str(exc))
+        db.write_log(user_id, "route", "ERROR", None, str(exc), ip)
         raise HTTPException(503, "AI model unavailable") from None
     tool = choice.get("tool", "none")
     # Values come from plain code, never from the AI.
@@ -209,29 +225,29 @@ def _ask(user_id: str, question: str) -> dict:
     # 2. Predictable rules (block only).
     allowed, reason = guard.check(question, tool, args)
     if not allowed:
-        return _blocked(user_id, tool, reason, "guard")
+        return _blocked(user_id, tool, reason, "guard", ip)
 
     # 3. AI intent check (block only).
     if not llm.intent_check(question, tool, args):
-        return _blocked(user_id, tool, "AI intent check: request does not match the question", "intent")
+        return _blocked(user_id, tool, "AI intent check: request does not match the question", "intent", ip)
 
     # 4. Fixed SQL + validated parameters.
     try:
         sql, params = build_query(tool, args)
     except ToolError as exc:
-        return _blocked(user_id, tool, str(exc), "tool")
+        return _blocked(user_id, tool, str(exc), "tool", ip)
 
     # 5. Db2 runs it AS the employee: row rules and masks apply here.
     try:
         rows = db.run_as(user_id, sql, params)
     except db.AccessDenied:
-        return _blocked(user_id, tool, "Db2 denied access for this employee", "db2")
+        return _blocked(user_id, tool, "Db2 denied access for this employee", "db2", ip)
 
     # 6. Volume rule: more rows than this tool should ever return.
     if len(rows) > TOOLS[tool]["max_rows"]:
-        return _blocked(user_id, tool, f"returned more than {TOOLS[tool]['max_rows']} rows", "volume")
+        return _blocked(user_id, tool, f"returned more than {TOOLS[tool]['max_rows']} rows", "volume", ip)
 
-    db.write_log(user_id, tool, "ALLOW", len(rows), f"args={args}")
+    db.write_log(user_id, tool, "ALLOW", len(rows), f"args={args}", ip)
     return {"decision": "ALLOWED", "tool": tool, "args": args, "stage": None,
             "answer": _answer(tool, args, rows), "rows": rows}
 
@@ -245,7 +261,7 @@ def logs(user: dict = Depends(current_user)):
         db.run_as(user["sub"],
                   "SELECT LOG_ID FROM BANK.ACCESS_LOG FETCH FIRST 1 ROWS ONLY")
     except db.AccessDenied:
-        db.write_log(user["sub"], "read_logs", "BLOCK", None, "Db2 denied log access")
+        db.write_log(user["sub"], "read_logs", "BLOCK", None, "Db2 denied log access", user.get("_ip"))
         return JSONResponse(
             {"detail": "Db2 denied: only auditors can read the audit log, "
                        "directly and not through the AI", "stage": "db2"},
