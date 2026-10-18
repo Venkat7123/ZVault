@@ -201,6 +201,40 @@ export DEMO_PASSWORD='...'; python tests/try_gateway.py
 python tests/test_alert_rules.py
 ```
 
+## Security evaluation
+
+### Results on LinuxONE z17
+| Test | What was tried | Result |
+|---|---|---|
+| `tests/try_gateway.py` (live gateway) | 10 scenarios: prompt injection in the question, another branch's customer, write requests, amount filters, reading the audit log, auditor login to the AI | 10/10 as expected; **0 rows from other branches, 0 unmasked IDs, 0 writes** |
+| Loan documents (live, `tests/demo_docs/`) | 3 PDFs with hidden instructions (white text, tiny/off-page text, metadata + hidden comment) and 1 clean PDF | 3/3 **quarantined, never read by the AI**; clean PDF accepted with 5 code-verified fields |
+| Alert engine (live) | failed sign-ins, blocked requests, write attempts, quarantined documents | HIGH / MEDIUM alerts raised within 60 s |
+| Automated checks | gateway routes, document scan, alert rules, React app, vault | all pass (incl. 83/83 vault tests on z17) |
+
+Detectors (guard rules, the document scan, Granite's checks) reduce risk but can be bypassed by new wording.
+ZVault's guarantee does not depend on them: **even a fully tricked AI cannot widen access or act.**
+
+### Rule of Two: no AI component has all three powers
+| Component | Reads untrusted text | Reaches private data | Can act |
+|---|---|---|---|
+| Granite router (questions) | yes (the question) | **no**, never sees rows | picks one **read-only** tool; Db2 decides what comes back |
+| Granite document reader | yes (a document that passed the scan) | **no**, only that document | **no**: fills 5 fields, each checked against the visible text |
+| Granite alert writer | **no**, safe counts only | **no** | **no**: severity is decided by code |
+| Db2 + gateway code | **no**, typed parameters only | yes, as the real employee | read-only, enforced by Db2 row permissions and masks |
+
+### Mapped to standards
+| Standard | Where ZVault addresses it |
+|---|---|
+| OWASP LLM01 Prompt injection | AI only routes; document quarantine; Db2 enforcement makes a successful injection harmless |
+| OWASP LLM02 Sensitive information disclosure | AI never sees rows; Db2 row permissions + Aadhaar/PAN/mobile masks; encrypted AI copies |
+| OWASP LLM05 Improper output handling | AI output limited to a tool name or 5 verified fields; UI renders plain text only |
+| OWASP LLM06 Excessive agency | read-only assistant, no write tools; gateway account has no data rights of its own |
+| OWASP LLM08 Vector and embedding weaknesses | embeddings encrypted per customer; erasure proven against inversion and membership tests |
+| OWASP LLM10 Unbounded consumption | login lockout, per-user question and upload limits, one Granite request at a time |
+| MITRE ATLAS AML.T0051 (LLM prompt injection) | direct and indirect paths above |
+| NIST AI RMF (Govern, Map, Measure, Manage) | read-only, logged AI (Govern); each input path mapped to a risk (Map); tests and alerts above (Measure); Db2 rules, quarantine, quantum-safe erasure (Manage) |
+| RBI FREE-AI / IT Governance 2023 | need-to-know access enforced by Db2; full audit trail; auditors read logs directly, never via AI |
+
 ## Roadmap
 | Next | What |
 |---|---|
