@@ -1,0 +1,26 @@
+{
+  "model": "qshelf-tfidf-logreg-v1",
+  "trained_at_utc": "2026-10-18T16:28:20+00:00",
+  "sha256": "d7dff52bb155583e534b7e6be79660af7e039d13e03a77f743fc992c58c0287a",
+  "data": {
+    "generator": "zvault_vault.data.generate_bank",
+    "customers": 300,
+    "train_seed": 11,
+    "test_seed": 12,
+    "train_copies": 2443,
+    "test_copies": 619,
+    "names": "generic only"
+  },
+  "results": {
+    "accuracy": 0.811,
+    "deleted_too_early": 0,
+    "flagged_for_review": 142
+  },
+  "versions": {
+    "python": "3.13.5",
+    "scikit_learn": "1.4.2",
+    "numpy": "2.2.4",
+    "machine": "s390x"
+  },
+  "load_note": "Load only after checking qshelf.pkl.sha256, with the same scikit-learn version."
+}

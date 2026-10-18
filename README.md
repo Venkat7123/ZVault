@@ -95,6 +95,27 @@ Open the live demo, sign in as one of the demo staff and ask:
 - Granite on LinuxONE: **1.4 → 4.9 tokens/s** after building llama.cpp for IBM Z vector instructions.
 - Alert engine live on LinuxONE: 3 wrong passwords + 2 write attempts by `CLERK1` raised a **HIGH** "failed sign-ins followed by blocked requests" alert plus MEDIUM/LOW alerts within 60 s, 4 of 5 worded by Granite. The alert service's own Db2 user cannot read customers (**SQL0551N**).
 
+### Quantum-safe vault on LinuxONE z17 (measured)
+Run in a Debian 13 container (OpenSSL **3.5.7**, `--network none`) on our 3-CPU LinuxONE VM: **83/83 tests pass**, CPACF detected.
+
+| Operation | z17 | x86 laptop (reference) |
+|---|---|---|
+| AES-256-GCM encrypt 1 MiB (CPACF) | **1,776 MiB/s** | 519 MiB/s |
+| AES-256-GCM decrypt 1 MiB (CPACF) | **1,381 MiB/s** | 545 MiB/s |
+| Hybrid ML-KEM-768 + X25519 wrap of a customer key | 4,756 /s | 6,091 /s |
+| ML-DSA-65 sign / verify | 604 / 3,477 /s | 1,244 / 6,651 /s |
+
+Bulk encryption of AI copies is ~3.4× faster thanks to CPACF; the post-quantum operations run in software and are slower on this small VM, but still thousands per second.
+
+| Erasure proof ("Forget me" on z17) | Before | After |
+|---|---|---|
+| Embedding inversion (token F1; random-noise baseline 0.173) | 0.915 | **0.156** |
+| Membership inference AUC (0.5 = guessing) | 1.00 | **0.58** |
+| Customer identifiers recovered | – | **none** |
+| Readable leftovers (residue scan) | – | **0** |
+
+ML-DSA-65 certificate valid, inclusion in the transparency log proven, an edited certificate is rejected. Retention model (QShelf, trained on z17 with generic names): 81.1 % accuracy on unseen phrasings, **0 of 619 copies deleted earlier than required**, uncertain cases keep the longer period and go to human review.
+
 ## Loan document scan (indirect prompt injection)
 ```
 PDF upload ─► code scan (hidden text, invisible chars, metadata, comments, JavaScript, AI-directed phrases)
@@ -137,7 +158,7 @@ journalctl -u botsbank-alerts -f            # live engine output
 | **Db2 12.1** | Row permissions, column masks, trusted context, SECADM separation |
 | **IBM Granite 3.3 2B Instruct** | On-box AI, big-endian GGUF, llama.cpp with VXE + OpenBLAS |
 | **CPACF** | AES-256-GCM encryption of AI copies via system OpenSSL |
-| **Quantum-safe crypto** | ML-KEM-768 (FIPS 203), ML-DSA-65 (FIPS 204) via OpenSSL 3.5 |
+| **Quantum-safe crypto** | ML-KEM-768 (FIPS 203), ML-DSA-65 (FIPS 204) via OpenSSL 3.5.7, running on z17 in a Debian 13 container |
 | **Crypto Express HSM / Secure Execution** | Integration-ready: same key interface (software stand-in in this environment) |
 
 ## Repository layout
@@ -150,7 +171,8 @@ tests/               test_trusted.py, try_gateway.py, test_web_routes.py, test_a
                      read_audit_log.py, read_alerts.py, find_client_ip.py
 deploy/              systemd units (llm, gateway, alerts) + install scripts
 Dockerfile, docker-compose.yml   gateway container (host network so Db2 sees 172.17.0.1)
-vault/               Quantum-safe AI data vault: zvault_vault package, tests, ZVault_Vault_Demo.ipynb
+vault/               Quantum-safe AI data vault: zvault_vault package, tests, Dockerfile (z17), run_demo.py,
+                     train_qshelf.py + models/ (retention model, SHA-256 fingerprint, how it was made)
 requirements.txt
 start_gateway.sh, start_alerts.sh, start_all.sh, stop_all.sh
 ```
@@ -172,10 +194,21 @@ pip install -r requirements.txt
 # 5. Alert engine: sql/07_alerts.sql (as db2inst1), OS user alertsvc in the db2 container,
 #    ~/.botsbank_alerts_env (ALERTSVC_PASSWORD=..., chmod 600), then:
 bash deploy/install_alerts.sh
-# 6. Tests
+# 6. Quantum-safe vault (Debian 13 container with OpenSSL 3.5; see vault/README.md)
+cd vault && sudo docker build -t zvault-vault . && cd ..
+# 7. Tests
 export DEMO_PASSWORD='...'; python tests/try_gateway.py
 python tests/test_alert_rules.py
 ```
+
+## Roadmap
+| Next | What |
+|---|---|
+| **Vault ↔ app integration** | The vault runs on z17 today as its own module. Next: after a clean loan-document scan, the 5 verified fields are stored as an encrypted AI copy under that customer's own quantum-safe key (only if Db2 confirms the employee may see the customer); a manager-only **"Forget customer"** action returns the signed erasure certificate on screen; legal hold stays an auditor-only action; vault events go to `ACCESS_LOG` and the alert engine. The vault runs as a separate local-only service, so the AI gateway can store but never read or hold customer keys. |
+| Retention job + `MASS_ERASURE` alert | Daily shredding of expired AI copies; HIGH alert on 3+ erasures in 10 minutes. |
+| Hybrid TLS | X25519MLKEM768 for the public site instead of plain HTTP. |
+| OCR | Scan text inside images (scanned pages) in uploaded documents. |
+| Crypto inventory | Find weak RSA/ECC/SHA-1 in code, configs and endpoints, ranked by data lifetime. |
 
 ## Known limits (honest)
 - Insiders misusing their **own legitimate** access are detected and alerted, not prevented.
@@ -202,6 +235,10 @@ RBI Master Direction on IT Governance 2023 (need-to-know) · RBI Cyber Security 
 [scikit-learn](https://github.com/scikit-learn/scikit-learn) ·
 [sentence-transformers](https://github.com/UKPLab/sentence-transformers) ·
 [pytest](https://github.com/pytest-dev/pytest) ·
+[pypdf](https://github.com/py-pdf/pypdf) ·
+[python-multipart](https://github.com/Kludex/python-multipart) ·
+[React](https://github.com/facebook/react) + [Vite](https://github.com/vitejs/vite) ·
+[Debian 13 image](https://hub.docker.com/_/debian) ·
 Db2 Community Edition (free, not open source)
 
 ## Team

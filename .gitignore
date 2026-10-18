@@ -25,3 +25,7 @@ botsbank/dist/
 .DS_Store
 Thumbs.db
 *.log
+
+# ---- Vault: demo runs create key stores and databases; never commit them ----
+vault/demo_data/
+*.egg-info/
