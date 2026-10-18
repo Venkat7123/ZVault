@@ -2,3 +2,5 @@ fastapi
 uvicorn
 pyjwt
 ibm_db
+pypdf
+python-multipart

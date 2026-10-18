@@ -1,6 +1,7 @@
 import { Link, Navigate, Route, Routes } from "react-router-dom";
 import { AppShell } from "./components/AppShell";
 import { AssistantPage } from "./pages/AssistantPage";
+import { DocumentsPage } from "./pages/DocumentsPage";
 import { HowItWorksPage } from "./pages/HowItWorksPage";
 import { LimitsPage } from "./pages/LimitsPage";
 import { SignInPage } from "./pages/SignInPage";
@@ -16,7 +17,7 @@ function NotFound() {
   );
 }
 
-// The gateway returns index.html only for "/", /signin, /assistant, /how-it-works and /limits.
+// The gateway returns index.html only for "/", /signin, /assistant, /documents, /how-it-works and /limits.
 export function App() {
   return (
     <Routes>
@@ -24,6 +25,7 @@ export function App() {
         <Route index element={<Navigate to="/assistant" replace />} />
         <Route path="signin" element={<SignInPage />} />
         <Route path="assistant" element={<AssistantPage />} />
+        <Route path="documents" element={<DocumentsPage />} />
         <Route path="how-it-works" element={<HowItWorksPage />} />
         <Route path="limits" element={<LimitsPage />} />
         <Route path="*" element={<NotFound />} />

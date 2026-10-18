@@ -61,6 +61,7 @@ TITLES = {
     "OFF_HOURS": "Use of the AI assistant outside working hours",
     "LOGIN_THEN_PROBE": "Failed sign-ins followed by blocked requests",
     "BAD_TOKENS": "Forged or tampered sign-in tokens",
+    "DOC_INJECTION": "Loan document with hidden AI instructions",
 }
 
 
@@ -170,6 +171,12 @@ def evaluate(events: list[Event], now: datetime) -> list[Finding]:
         limited = [e for e in evs if e.reason.startswith("too many questions")]
         if limited:
             found.append(_finding("RATE_LIMITED", "MEDIUM", subj, limited, times_limited=len(limited),
+                                  window_minutes=10))
+        # 12. A quarantined document (hidden instructions for the AI)
+        docs = [e for e in evs if e.action == "doc_scan" and e.decision == "BLOCK"
+                and e.reason.startswith("document quarantined")]
+        if docs:
+            found.append(_finding("DOC_INJECTION", "HIGH", subj, docs, documents=len(docs),
                                   window_minutes=10))
         # 8. Bulk reading: many allowed answers or many rows (scraping)
         allowed = [e for e in evs if e.decision == "ALLOW"]

@@ -31,7 +31,7 @@ A CoreView vendor survey (2026) found 66% of IT leaders delayed or cancelled Cop
 | Feature | What it does |
 |---|---|
 | **No master key** | Granite picks one read-only tool; parameterized SQL runs as the employee; Db2 enforces own-branch rows and masks Aadhaar/PAN/mobile |
-| **Injection-proof** | Questions and documents are treated as data; hidden instructions are detected; a hijacked AI still can't widen access |
+| **Injection-proof** | Questions are only routed, never obeyed. Uploaded loan PDFs are scanned **before any AI reads them** for white/tiny/off-page/invisible text, invisible characters, instructions in metadata or hidden comments, and JavaScript; anything found = **QUARANTINED** and the AI never sees it. Clean documents: Granite fills 5 fixed fields, and code shows a value only if it is really in the visible text |
 | **Detect misuse** | Every request (with client IP, incl. forged tokens) is logged to `BANK.ACCESS_LOG`; a separate alert engine runs 11 rules (failed sign-ins, password spraying, blocked-request bursts, audit-log probes, write attempts, bulk reading, off-hours use…); Granite writes the plain-language alert for auditors |
 | **Quantum-safe AI data vault** | AI copies encrypted with AES-256-GCM; keys wrapped under hybrid **ML-KEM-768 + X25519**; key states ACTIVE → PENDING → DESTROYED; legal hold (PMLA) wins |
 | **Provable erasure** | After "Forget me", ZVault attacks itself (decrypt, embedding inversion, membership inference, residue scan) and issues an **ML-DSA-65** signed certificate in a Merkle transparency log |
@@ -95,6 +95,18 @@ Open the live demo, sign in as one of the demo staff and ask:
 - Granite on LinuxONE: **1.4 → 4.9 tokens/s** after building llama.cpp for IBM Z vector instructions.
 - Alert engine live on LinuxONE: 3 wrong passwords + 2 write attempts by `CLERK1` raised a **HIGH** "failed sign-ins followed by blocked requests" alert plus MEDIUM/LOW alerts within 60 s, 4 of 5 worded by Granite. The alert service's own Db2 user cannot read customers (**SQL0551N**).
 
+## Loan document scan (indirect prompt injection)
+```
+PDF upload ─► code scan (hidden text, invisible chars, metadata, comments, JavaScript, AI-directed phrases)
+                 │ anything found ──► QUARANTINED: AI never reads it; clerk sees visible vs hidden text;
+                 │                     logged ─► DOC_INJECTION alert (HIGH)
+                 ▼ clean
+           Granite: "does this instruct an AI?" (block only)
+                 ▼
+           Granite fills 5 fixed fields ─► code keeps a value only if it is in the visible text
+```
+Try it on the **Documents** page with the demo files in `tests/demo_docs/` (`python tests/make_demo_pdfs.py` recreates them). The file is read in memory and never stored; only its SHA-256 fingerprint and the verdict are logged.
+
 ## Suspicious-access alerts
 ```
 ACCESS_LOG ──(read-only, as ALERTSVC)──► alerts/rules.py ──► severity decided by code
@@ -111,7 +123,8 @@ ACCESS_LOG ──(read-only, as ALERTSVC)──► alerts/rules.py ──► sev
 - **Least privilege:** `ALERTSVC` can read the log and write alerts only; auditors can read alerts and mark them `REVIEWED`.
 
 ```bash
-python tests/test_alert_rules.py            # 30 rule checks, no Db2 needed
+python tests/test_alert_rules.py            # rule checks, no Db2 needed
+python tests/test_docscan.py                # document scan checks, no Db2/Granite needed
 python tests/read_alerts.py --open          # auditor view (AUDITOR1_PASSWORD set)
 python tests/read_alerts.py --review 21     # mark reviewed
 journalctl -u botsbank-alerts -f            # live engine output
@@ -170,6 +183,7 @@ python tests/test_alert_rules.py
 - A stolen gateway (`AIGW`) password could act as a listed clerk/manager, never an auditor; keep it in a vault.
 - `DB2INST1` remains instance owner (can stop the database) even after SECADM was moved.
 - Crypto Express HSM and Secure Execution are simulated in this environment.
+- The document scan does not read text inside images (scanned pages need OCR), and assumes a white page when spotting white text; new wording can slip past the phrase checks, which is why a clean document's AI output is limited to 5 verified fields.
 - The demo runs over plain HTTP; production needs TLS (hybrid X25519MLKEM768).
 
 ## Regulations and standards considered

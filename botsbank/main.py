@@ -17,11 +17,11 @@ from collections import deque
 from pathlib import Path
 
 import jwt
-from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi import Depends, FastAPI, File, Header, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
-from . import auth, db, guard, llm
+from . import auth, db, docscan, guard, llm
 from .tools import TOOLS, ToolError, build_query, extract_args
 
 # PUBLIC_MODE=1 when the site is reachable from the internet: hides /docs.
@@ -38,6 +38,9 @@ LOGIN_FAILS_TOTAL = 30        # per 5 minutes, all users together
 ASKS_PER_USER = 10            # per minute
 LLM_WAIT_SECONDS = 120        # Granite answers one question at a time
 TOKEN_FAIL_LOGS = 60          # max bad-token log rows per minute (stops log flooding)
+DOCS_PER_USER = 5             # document scans per minute
+DOC_UPLOAD_LIMIT = docscan.MAX_BYTES + 64 * 1024   # file + multipart overhead
+DOC_AI_CHECK = os.getenv("DOC_AI_CHECK", "1") == "1"  # Granite second opinion (block only)
 
 _hits: dict[str, deque] = {}
 _hits_lock = threading.Lock()
@@ -61,7 +64,7 @@ STATIC_FILES = {"app.css": "text/css", "app.js": "text/javascript"}
 
 # React app (frontend/ -> `npm run build` writes botsbank/dist).
 DIST = Path(__file__).parent / "dist"
-PAGE_ROUTES = ("/", "/signin", "/assistant", "/how-it-works", "/limits")
+PAGE_ROUTES = ("/", "/signin", "/assistant", "/documents", "/how-it-works", "/limits")
 ASSET_NAME = re.compile(r"^[A-Za-z0-9._-]{1,100}$")
 ASSET_TYPES = {".js": "text/javascript", ".css": "text/css", ".woff2": "font/woff2",
                ".woff": "font/woff", ".svg": "image/svg+xml", ".png": "image/png"}
@@ -69,6 +72,14 @@ ASSET_TYPES = {".js": "text/javascript", ".css": "text/css", ".woff2": "font/wof
 
 @app.middleware("http")
 async def security_headers(request: Request, call_next):
+    # Refuse oversized uploads BEFORE the body is read (no Content-Length = refused too).
+    if request.url.path == "/documents/scan" and request.method == "POST":
+        try:
+            size = int(request.headers.get("content-length", ""))
+        except ValueError:
+            return JSONResponse({"detail": "Upload size missing"}, status_code=411)
+        if size > DOC_UPLOAD_LIMIT:
+            return JSONResponse({"detail": "File is larger than 2 MB"}, status_code=413)
     response = await call_next(request)
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Referrer-Policy"] = "no-referrer"
@@ -267,3 +278,58 @@ def logs(user: dict = Depends(current_user)):
                        "directly and not through the AI", "stage": "db2"},
             status_code=403)
     raise HTTPException(500, "Unexpected: Db2 allowed log access; check grants")
+
+
+# ---------- Loan documents: scan BEFORE any AI reads them ----------
+
+def _doc_reply(verdict: str, result, findings: list, fields: list | None = None) -> dict:
+    return {"verdict": verdict, "sha256": result.sha256[:16], "pages": result.pages,
+            "findings": findings, "fields": fields or [],
+            "visible_text": result.visible_text[:3000],
+            "note": ("AI summary of the visible text only. Values are shown only when found in the "
+                     "document. You make the decision.") if verdict == "CLEAN" else
+                    "Quarantined: the AI did not read this document. Hidden content is shown below."}
+
+
+@app.post("/documents/scan")
+def scan_document(file: UploadFile = File(...), user: dict = Depends(current_user)):
+    """1. code scan -> 2. Granite injection check (block only) -> 3. Granite fills 5 fields
+    -> 4. code verifies each value is in the visible text. Anything suspicious = QUARANTINED,
+    and then the AI never reads the document. The file is never stored."""
+    user_id, ip = user["sub"], user.get("_ip")
+    if _count(f"doc:{user_id}", 60, add=True) > DOCS_PER_USER:
+        db.write_log(user_id, "doc_scan", "BLOCK", None, "too many document scans per minute", ip)
+        raise HTTPException(429, "Too many documents. Please wait a minute.")
+    data = file.file.read(docscan.MAX_BYTES + 1)
+    try:
+        result = docscan.scan(data)
+    except docscan.DocRejected as exc:
+        db.write_log(user_id, "doc_scan", "BLOCK", None, f"document rejected: {exc}", ip)
+        raise HTTPException(400, f"Document not accepted: {exc}") from None
+    tag = f"sha256={result.sha256[:16]}"
+
+    if result.verdict == "QUARANTINED":
+        db.write_log(user_id, "doc_scan", "BLOCK", None,
+                     f"document quarantined: {', '.join(result.kinds)} {tag}", ip)
+        return _doc_reply("QUARANTINED", result, result.findings)
+
+    if not _llm_slot.acquire(timeout=LLM_WAIT_SECONDS):
+        raise HTTPException(503, "The assistant is busy. Please try again shortly.")
+    try:
+        if DOC_AI_CHECK and not llm.doc_injection_check(result.visible_text):
+            finding = {"kind": "ai_check", "where": "visible text", "text": "",
+                       "detail": "Granite found text that tries to instruct an AI"}
+            db.write_log(user_id, "doc_scan", "BLOCK", None, f"document quarantined: ai_check {tag}", ip)
+            return _doc_reply("QUARANTINED", result, [finding])
+        try:
+            raw = llm.extract_fields(result.visible_text)
+        except RuntimeError as exc:
+            db.write_log(user_id, "doc_scan", "ERROR", None, str(exc), ip)
+            raise HTTPException(503, "AI model unavailable") from None
+    finally:
+        _llm_slot.release()
+
+    fields = docscan.verify_fields(raw, llm.FIELDS, result.visible_text)
+    verified = sum(f["verified"] for f in fields)
+    db.write_log(user_id, "doc_scan", "ALLOW", verified, f"document clean {tag}", ip)
+    return _doc_reply("CLEAN", result, [], fields)

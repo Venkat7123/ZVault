@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ApiError, ask, getMe, login, readAuditLog } from "../api";
+import { ApiError, ask, getMe, login, readAuditLog, scanDocument } from "../api";
 
 function reply(status: number, body: unknown) {
   return vi.fn().mockResolvedValue({
@@ -75,5 +75,27 @@ describe("api client", () => {
   it("readAuditLog treats a 403 without a stage as an error", async () => {
     vi.stubGlobal("fetch", reply(403, { detail: "nope" }));
     await expect(readAuditLog("t")).rejects.toBeInstanceOf(ApiError);
+  });
+});
+
+describe("document upload", () => {
+  it("posts the file as form data with the bearer token and no JSON content type", async () => {
+    const f = reply(200, { verdict: "CLEAN", sha256: "a", pages: 1, findings: [], fields: [], visible_text: "", note: "" });
+    vi.stubGlobal("fetch", f);
+    const file = new File(["%PDF-1.7"], "loan.pdf", { type: "application/pdf" });
+    await expect(scanDocument("abc", file)).resolves.toMatchObject({ verdict: "CLEAN" });
+    const [url, init] = f.mock.calls[0];
+    expect(url).toBe("/documents/scan");
+    expect(init.method).toBe("POST");
+    expect(init.headers.Authorization).toBe("Bearer abc");
+    expect(init.headers["Content-Type"]).toBeUndefined();
+    expect(init.body).toBeInstanceOf(FormData);
+    expect((init.body as FormData).get("file")).toBe(file);
+  });
+
+  it("turns a 400 into an ApiError with the server message", async () => {
+    vi.stubGlobal("fetch", reply(400, { detail: "Document not accepted: only PDF files are accepted" }));
+    await expect(scanDocument("abc", new File(["x"], "x.txt"))).rejects.toMatchObject({
+      status: 400, message: "Document not accepted: only PDF files are accepted" });
   });
 });

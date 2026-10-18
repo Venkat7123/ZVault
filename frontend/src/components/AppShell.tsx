@@ -16,6 +16,7 @@ export function AppShell() {
         </Link>
         <nav aria-label="Main" className="nav">
           <NavLink to="/assistant">Assistant</NavLink>
+          <NavLink to="/documents">Documents</NavLink>
           <NavLink to="/how-it-works">How it works</NavLink>
           <NavLink to="/limits">Limits</NavLink>
         </nav>

@@ -18,6 +18,7 @@ export default defineConfig({
       "/ask": "http://127.0.0.1:8000",
       "/logs": "http://127.0.0.1:8000",
       "/me": "http://127.0.0.1:8000",
+      "/documents/scan": "http://127.0.0.1:8000",
       "/health": "http://127.0.0.1:8000",
     },
   },

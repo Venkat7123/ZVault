@@ -220,3 +220,21 @@ td.masked { font-family: var(--mono); color: var(--brass); letter-spacing: 0.02e
   border-top: 1px solid var(--line); padding: 14px 20px; text-align: center;
   color: var(--muted); font-size: 13px;
 }
+
+/* ---------- Loan documents ---------- */
+.docs { display: grid; gap: 16px; max-width: 1100px; margin: 0 auto; }
+.doc-actions { margin-top: 14px; }
+.doc-warning { color: var(--block); background: var(--block-bg); border-radius: 8px; padding: 9px 12px; font-weight: 600; }
+.mono { font-family: var(--mono); }
+.doc-compare { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
+.doctext {
+  font: 13px/1.5 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; margin: 0;
+  background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px;
+  max-height: 340px; overflow-y: auto;
+}
+.hidden-text { border-color: var(--block); background: var(--block-bg); color: var(--block); }
+.findings { list-style: none; margin: 0; padding: 0; display: grid; gap: 12px; }
+.finding-head { margin: 0; }
+.finding .small { margin: 2px 0 6px; }
+.doc-details { margin-top: 14px; }
+.doc-details summary { cursor: pointer; font-weight: 600; margin-bottom: 8px; }

@@ -29,6 +29,33 @@ export interface AskResult {
   stage?: Stage | null;
 }
 
+/** Loan-document scan (POST /documents/scan). */
+export type DocVerdict = "CLEAN" | "QUARANTINED";
+
+export interface DocFinding {
+  kind: string;
+  where: string;
+  detail: string;
+  text: string;
+}
+
+export interface DocField {
+  name: string;
+  label: string;
+  value: string;
+  verified: boolean;
+}
+
+export interface DocResult {
+  verdict: DocVerdict;
+  sha256: string;
+  pages: number;
+  findings: DocFinding[];
+  fields: DocField[];
+  visible_text: string;
+  note: string;
+}
+
 export class ApiError extends Error {
   readonly status: number;
   constructor(status: number, message: string) {
@@ -97,4 +124,29 @@ export async function readAuditLog(token: string): Promise<AskResult> {
     }
   }
   throw new ApiError(r.status, detailOf(r.data, r.status));
+}
+
+/** Upload one PDF. No Content-Type header: the browser sets the multipart boundary itself. */
+export async function scanDocument(token: string, file: File): Promise<DocResult> {
+  const form = new FormData();
+  form.append("file", file);
+  let resp: Response;
+  try {
+    resp = await fetch(BASE + "/documents/scan", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}` },
+      body: form,
+      cache: "no-store",
+    });
+  } catch {
+    throw new ApiError(0, "Could not reach the gateway.");
+  }
+  let data: unknown = null;
+  try {
+    data = await resp.json();
+  } catch {
+    /* non-JSON error body */
+  }
+  if (!resp.ok) throw new ApiError(resp.status, detailOf(data, resp.status));
+  return data as DocResult;
 }
