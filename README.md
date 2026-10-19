@@ -35,6 +35,7 @@ A CoreView vendor survey (2026) found 66% of IT leaders delayed or cancelled Cop
 | **Detect misuse** | Every request (with client IP, incl. forged tokens) is logged to `BANK.ACCESS_LOG`; a separate alert engine runs 11 rules (failed sign-ins, password spraying, blocked-request bursts, audit-log probes, write attempts, bulk reading, off-hours use…); Granite writes the plain-language alert for auditors |
 | **Quantum-safe AI data vault** | AI copies encrypted with AES-256-GCM; keys wrapped under hybrid **ML-KEM-768 + X25519**; key states ACTIVE → PENDING → DESTROYED; legal hold (PMLA) wins |
 | **Provable erasure** | After "Forget me", ZVault attacks itself (decrypt, embedding inversion, membership inference, residue scan) and issues an **ML-DSA-65** signed certificate in a Merkle transparency log |
+| **Vault in the app** | A clean loan document's verified fields are saved as an encrypted AI copy under that customer's own key, only if Db2 lets the employee see the customer. Branch managers get a **Privacy** page: see what is held (never the content), remove one poisoned copy, or **Forget customer** and get the signed certificate on screen |
 | **Retention model** | An ML model predicts how long each AI copy must be kept (30 days / 1 yr / 5 yrs / 20 yrs) and shreds expired copies |
 | **Crypto inventory** | Finds weak RSA/ECC usage to migrate to quantum-safe algorithms |
 
@@ -128,6 +129,33 @@ PDF upload ─► code scan (hidden text, invisible chars, metadata, comments, J
 ```
 Try it on the **Documents** page with the demo files in `tests/demo_docs/` (`python tests/make_demo_pdfs.py` recreates them). The file is read in memory and never stored; only its SHA-256 fingerprint and the verdict are logged.
 
+## AI data vault in the app (right to be forgotten)
+```
+clean document ─► gateway asks Db2 (as the clerk): may this employee see Customer 1002?
+                     │ no ──► not saved (logged BLOCK)
+                     ▼ yes
+                  vault service (127.0.0.1:8090, own container, OpenSSL 3.5)
+                     stores the 5 verified fields + embedding, AES-256-GCM under
+                     Customer 1002's key ◄── wrapped by ML-KEM-768 + X25519
+                     retention model decides how long to keep it
+
+Privacy page (MANAGER only, own branch via Db2):
+   list copies (metadata only) · remove one copy (poisoned / wrong customer / duplicate)
+   Forget customer (identity checked + type "FORGET 1002") ─► key destroyed ─► ZVault attacks itself
+   ─► ML-DSA-65 signed certificate in the transparency log, shown on screen
+Legal hold: AUDITOR only, straight at the vault (tests/legal_hold.py); while on, erasure is refused (signed)
+```
+| Guarantee | How |
+|---|---|
+| The AI gateway can store but **never read** an AI copy | the vault has no "read content" route for the gateway token; customer keys never leave the vault |
+| No customer numbers in vault files | customers are pseudonymized with HMAC-SHA256 (secret kept in the vault's data folder, 0600) |
+| Only allowed people act | save: Db2 must show the customer to the employee; privacy actions: MANAGER role **and** Db2 visibility; legal hold: separate auditor token |
+| Erasure is proven, not promised | after key destruction the vault tries to decrypt, invert embeddings, detect the customer (membership test) and find leftovers; results go in the signed certificate |
+| Watched | `vault_store` / `privacy` / `vault_forget` / `vault_remove` events go to `ACCESS_LOG`; alerts **MASS_ERASURE** (3+ erasures by one person in 10 min, HIGH) and **PRIVACY_PROBE** (non-manager tries privacy actions) |
+| Kept only as long as needed | a daily timer (`deploy/zvault-retention.timer`) shreds expired copies, except under legal hold |
+
+If the vault is down, the document scan still works; nothing is saved and the screen says so. Core banking records in Db2 are never deleted by "Forget customer"; it erases the AI's copies.
+
 ## Suspicious-access alerts
 ```
 ACCESS_LOG ──(read-only, as ALERTSVC)──► alerts/rules.py ──► severity decided by code
@@ -167,11 +195,12 @@ botsbank/            FastAPI gateway: main.py, auth.py, db.py, tools.py, llm.py,
 alerts/              Alert engine: rules.py, summary.py (Granite), store.py (Db2), run.py
 frontend/            ZVault web app (React + TypeScript + Vite) → builds into botsbank/dist
 sql/                 01_bank_schema … 05_revoke_admin, 06_show_security, 07_alerts
-tests/               test_trusted.py, try_gateway.py, test_web_routes.py, test_alert_rules.py,
-                     read_audit_log.py, read_alerts.py, find_client_ip.py
-deploy/              systemd units (llm, gateway, alerts) + install scripts
-Dockerfile, docker-compose.yml   gateway container (host network so Db2 sees 172.17.0.1)
-vault/               Quantum-safe AI data vault: zvault_vault package, tests, Dockerfile (z17), run_demo.py,
+tests/               test_trusted.py, try_gateway.py, test_web_routes.py, test_alert_rules.py, test_docscan.py,
+                     test_privacy.py, legal_hold.py, read_audit_log.py, read_alerts.py, find_client_ip.py
+deploy/              systemd units (llm, gateway, alerts, vault retention timer) + install scripts
+Dockerfile, docker-compose.yml   gateway + vault containers (host network so Db2 sees 172.17.0.1)
+vault/               Quantum-safe AI data vault: zvault_vault package, service.py (local HTTP service used by
+                     the gateway), jobs.py (retention run), tests, Dockerfile (z17), run_demo.py,
                      train_qshelf.py + models/ (retention model, SHA-256 fingerprint, how it was made)
 requirements.txt
 start_gateway.sh, start_alerts.sh, start_all.sh, stop_all.sh
@@ -194,11 +223,16 @@ pip install -r requirements.txt
 # 5. Alert engine: sql/07_alerts.sql (as db2inst1), OS user alertsvc in the db2 container,
 #    ~/.botsbank_alerts_env (ALERTSVC_PASSWORD=..., chmod 600), then:
 bash deploy/install_alerts.sh
-# 6. Quantum-safe vault (Debian 13 container with OpenSSL 3.5; see vault/README.md)
-cd vault && sudo docker build -t zvault-vault . && cd ..
+# 6. Quantum-safe vault service (Debian 13 container with OpenSSL 3.5; see vault/README.md)
+#    ~/.zvault_env (chmod 600): VAULT_GATEWAY_TOKEN=<32+ chars>  VAULT_AUDITOR_TOKEN=<different 32+ chars>
+#    ~/.botsbank_env: add VAULT_TOKEN=<same as VAULT_GATEWAY_TOKEN>
+mkdir -m 700 ~/zvault_data
+sudo docker compose up -d --build            # gateway + vault
+sudo cp deploy/zvault-retention.* /etc/systemd/system/ && sudo systemctl enable --now zvault-retention.timer
 # 7. Tests
 export DEMO_PASSWORD='...'; python tests/try_gateway.py
 python tests/test_alert_rules.py
+python tests/test_privacy.py        # vault + gateway end to end (needs OpenSSL 3.5)
 ```
 
 ## Security evaluation
@@ -209,7 +243,7 @@ python tests/test_alert_rules.py
 | `tests/try_gateway.py` (live gateway) | 10 scenarios: prompt injection in the question, another branch's customer, write requests, amount filters, reading the audit log, auditor login to the AI | 10/10 as expected; **0 rows from other branches, 0 unmasked IDs, 0 writes** |
 | Loan documents (live, `tests/demo_docs/`) | 3 PDFs with hidden instructions (white text, tiny/off-page text, metadata + hidden comment) and 1 clean PDF | 3/3 **quarantined, never read by the AI**; clean PDF accepted with 5 code-verified fields |
 | Alert engine (live) | failed sign-ins, blocked requests, write attempts, quarantined documents | HIGH / MEDIUM alerts raised within 60 s |
-| Automated checks | gateway routes, document scan, alert rules, React app, vault | all pass (incl. 83/83 vault tests on z17) |
+| Automated checks | gateway routes, document scan, alert rules, React app, vault | all pass (incl. 90 vault tests in the z17 container; 25/25 vault-in-app checks) |
 
 Detectors (guard rules, the document scan, Granite's checks) reduce risk but can be bypassed by new wording.
 ZVault's guarantee does not depend on them: **even a fully tricked AI cannot widen access or act.**
@@ -219,6 +253,7 @@ ZVault's guarantee does not depend on them: **even a fully tricked AI cannot wid
 |---|---|---|---|
 | Granite router (questions) | yes (the question) | **no**, never sees rows | picks one **read-only** tool; Db2 decides what comes back |
 | Granite document reader | yes (a document that passed the scan) | **no**, only that document | **no**: fills 5 fields, each checked against the visible text |
+| Vault service | **no**, only verified fields from code | yes, encrypted AI copies | stores and erases only; no AI inside; gateway token cannot read content or set legal hold |
 | Granite alert writer | **no**, safe counts only | **no** | **no**: severity is decided by code |
 | Db2 + gateway code | **no**, typed parameters only | yes, as the real employee | read-only, enforced by Db2 row permissions and masks |
 
@@ -238,8 +273,8 @@ ZVault's guarantee does not depend on them: **even a fully tricked AI cannot wid
 ## Roadmap
 | Next | What |
 |---|---|
-| **Vault ↔ app integration** | The vault runs on z17 today as its own module. Next: after a clean loan-document scan, the 5 verified fields are stored as an encrypted AI copy under that customer's own quantum-safe key (only if Db2 confirms the employee may see the customer); a manager-only **"Forget customer"** action returns the signed erasure certificate on screen; legal hold stays an auditor-only action; vault events go to `ACCESS_LOG` and the alert engine. The vault runs as a separate local-only service, so the AI gateway can store but never read or hold customer keys. |
-| Retention job + `MASS_ERASURE` alert | Daily shredding of expired AI copies; HIGH alert on 3+ erasures in 10 minutes. |
+| Customer self-service | Let customers raise "forget me" themselves (net banking), with the branch verifying identity. |
+| Real HSM | Move the customer keys from the software stand-in to Crypto Express (CCA/EP11). |
 | Hybrid TLS | X25519MLKEM768 for the public site instead of plain HTTP. |
 | OCR | Scan text inside images (scanned pages) in uploaded documents. |
 | Crypto inventory | Find weak RSA/ECC/SHA-1 in code, configs and endpoints, ranked by data lifetime. |

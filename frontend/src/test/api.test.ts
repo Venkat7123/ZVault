@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ApiError, ask, getMe, login, readAuditLog, scanDocument } from "../api";
+import { ApiError, ask, forgetCustomer, getMe, login, readAuditLog, removeCopy, scanDocument } from "../api";
 
 function reply(status: number, body: unknown) {
   return vi.fn().mockResolvedValue({
@@ -97,5 +97,26 @@ describe("document upload", () => {
     vi.stubGlobal("fetch", reply(400, { detail: "Document not accepted: only PDF files are accepted" }));
     await expect(scanDocument("abc", new File(["x"], "x.txt"))).rejects.toMatchObject({
       status: 400, message: "Document not accepted: only PDF files are accepted" });
+  });
+});
+
+describe("privacy calls", () => {
+  it("forget posts the confirmation with the bearer token", async () => {
+    const f = reply(200, { request_id: "ER-1", status: "erased", proofs: {}, certificate: {} });
+    vi.stubGlobal("fetch", f);
+    await forgetCustomer("abc", "1002", "FORGET 1002");
+    const [url, init] = f.mock.calls[0];
+    expect(url).toBe("/privacy/customers/1002/forget");
+    expect(init.method).toBe("POST");
+    expect(init.headers.Authorization).toBe("Bearer abc");
+    expect(JSON.parse(init.body)).toEqual({ identity_verified: true, confirm: "FORGET 1002" });
+  });
+
+  it("remove sends only the reason", async () => {
+    const f = reply(200, { request_id: "RM-1", status: "removed", copies: [], proofs: {}, certificate: {} });
+    vi.stubGlobal("fetch", f);
+    await removeCopy("abc", "1002", "agent-memory-0123456789ab", "poisoned");
+    expect(f.mock.calls[0][0]).toBe("/privacy/customers/1002/copies/agent-memory-0123456789ab/remove");
+    expect(JSON.parse(f.mock.calls[0][1].body)).toEqual({ reason: "poisoned" });
   });
 });

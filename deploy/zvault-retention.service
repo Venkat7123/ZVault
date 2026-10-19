@@ -1,0 +1,10 @@
+# /etc/systemd/system/zvault-retention.service
+# Shreds expired AI copies in the ZVault vault (legal holds are kept) and publishes a signed record.
+# Started daily by zvault-retention.timer. Runs inside the already running vault container.
+[Unit]
+Description=ZVault - daily retention run (shred expired AI copies)
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/docker exec zvault-vault python3 jobs.py retention

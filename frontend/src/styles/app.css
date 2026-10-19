@@ -238,3 +238,17 @@ td.masked { font-family: var(--mono); color: var(--brass); letter-spacing: 0.02e
 .finding .small { margin: 2px 0 6px; }
 .doc-details { margin-top: 14px; }
 .doc-details summary { cursor: pointer; font-weight: 600; margin-bottom: 8px; }
+
+/* ---------- Vault: saved note and privacy page ---------- */
+.stored { margin-top: 14px; border-radius: 8px; padding: 10px 14px; }
+.stored-yes { background: var(--allow-bg); border: 1px solid var(--line); }
+.stored-yes .stored-head { margin: 0 0 6px; font-weight: 600; color: var(--allow); }
+.stored-no { background: var(--bg); border: 1px solid var(--line); color: var(--muted); }
+.input-short { max-width: 280px; }
+.forget-box { margin-top: 18px; border-top: 1px solid var(--line); padding-top: 6px; }
+.check { display: flex; align-items: center; gap: 8px; font-weight: 400; }
+.check input { width: auto; }
+.btn-danger { background: var(--block); color: var(--on-primary); }
+.btn-danger:hover:not(:disabled) { filter: brightness(1.1); }
+td .row { flex-wrap: nowrap; }
+td select { min-width: 220px; }

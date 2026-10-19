@@ -46,7 +46,21 @@ export interface DocField {
   verified: boolean;
 }
 
+/** What happened to the verified summary in the quantum-safe vault (clean documents only). */
+export interface DocStored {
+  saved: boolean;
+  customer?: string;
+  reason?: string;
+  copy_id?: string;
+  retention_class?: string;
+  retention_days?: number;
+  needs_review?: boolean;
+  encryption?: string;
+  key?: string;
+}
+
 export interface DocResult {
+  stored?: DocStored;
   verdict: DocVerdict;
   sha256: string;
   pages: number;
@@ -150,3 +164,78 @@ export async function scanDocument(token: string, file: File): Promise<DocResult
   if (!resp.ok) throw new ApiError(resp.status, detailOf(data, resp.status));
   return data as DocResult;
 }
+
+// ---------- Customer privacy (branch managers only; the gateway enforces it) ----------
+
+export interface PrivacyCopy {
+  copy_id: string;
+  kind: string;
+  created_at: number;
+  retention_class: string | null;
+  retention_until: number | null;
+  status: "encrypted" | "removed" | "erased";
+}
+
+export interface PrivacyView {
+  customer: string;
+  key_state: string;
+  legal_hold: boolean;
+  key: string;
+  copies: PrivacyCopy[];
+}
+
+export interface Proofs {
+  signature_valid: boolean;
+  tree_head_valid: boolean;
+  in_transparency_log: boolean;
+  log_index: number;
+  log_size: number;
+  signature_algorithm: string;
+  signer_key_id: string;
+}
+
+export interface ForgetSummary {
+  copies_erased: number;
+  copies_failed: number;
+  not_verifiable: string[];
+  key_state: string;
+  inversion_f1_before: number;
+  inversion_f1_after: number;
+  noise_baseline_f1: number;
+  identifiers_recovered: string[];
+  customer_detected_before: boolean;
+  customer_detected_after: boolean;
+  residue_files_scanned: number;
+  residue_leaks: number;
+}
+
+export interface ForgetResult {
+  request_id: string;
+  status: string;
+  reason?: string | null;
+  summary?: ForgetSummary;
+  proofs: Proofs;
+  certificate: unknown;
+}
+
+export interface RemoveResult {
+  request_id: string;
+  status: string;
+  copies: { copy_id: string; result: string; evidence: string }[];
+  proofs: Proofs;
+  certificate: unknown;
+}
+
+export type RemovalReason = "poisoned" | "wrong_customer" | "duplicate";
+
+export const getPrivacy = (token: string, customer: string) =>
+  json<PrivacyView>("GET", `/privacy/customers/${encodeURIComponent(customer)}`, undefined, token);
+
+export const forgetCustomer = (token: string, customer: string, confirm: string) =>
+  json<ForgetResult>("POST", `/privacy/customers/${encodeURIComponent(customer)}/forget`,
+    { identity_verified: true, confirm }, token);
+
+export const removeCopy = (token: string, customer: string, copyId: string, reason: RemovalReason) =>
+  json<RemoveResult>("POST",
+    `/privacy/customers/${encodeURIComponent(customer)}/copies/${encodeURIComponent(copyId)}/remove`,
+    { reason }, token);

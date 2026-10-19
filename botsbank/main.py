@@ -19,9 +19,11 @@ from pathlib import Path
 import jwt
 from fastapi import Depends, FastAPI, File, Header, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
-from . import auth, db, docscan, guard, llm
+from . import auth, db, docscan, guard, llm, vault_client
 from .tools import TOOLS, ToolError, build_query, extract_args
 
 # PUBLIC_MODE=1 when the site is reachable from the internet: hides /docs.
@@ -41,6 +43,7 @@ TOKEN_FAIL_LOGS = 60          # max bad-token log rows per minute (stops log flo
 DOCS_PER_USER = 5             # document scans per minute
 DOC_UPLOAD_LIMIT = docscan.MAX_BYTES + 64 * 1024   # file + multipart overhead
 DOC_AI_CHECK = os.getenv("DOC_AI_CHECK", "1") == "1"  # Granite second opinion (block only)
+FORGETS_PER_MANAGER = 5       # erasures per manager per hour (hard cap; alerts fire from 3 in 10 min)
 
 _hits: dict[str, deque] = {}
 _hits_lock = threading.Lock()
@@ -64,7 +67,7 @@ STATIC_FILES = {"app.css": "text/css", "app.js": "text/javascript"}
 
 # React app (frontend/ -> `npm run build` writes botsbank/dist).
 DIST = Path(__file__).parent / "dist"
-PAGE_ROUTES = ("/", "/signin", "/assistant", "/documents", "/how-it-works", "/limits")
+PAGE_ROUTES = ("/", "/signin", "/assistant", "/documents", "/privacy", "/how-it-works", "/limits")
 ASSET_NAME = re.compile(r"^[A-Za-z0-9._-]{1,100}$")
 ASSET_TYPES = {".js": "text/javascript", ".css": "text/css", ".woff2": "font/woff2",
                ".woff": "font/woff", ".svg": "image/svg+xml", ".png": "image/png"}
@@ -332,4 +335,123 @@ def scan_document(file: UploadFile = File(...), user: dict = Depends(current_use
     fields = docscan.verify_fields(raw, llm.FIELDS, result.visible_text)
     verified = sum(f["verified"] for f in fields)
     db.write_log(user_id, "doc_scan", "ALLOW", verified, f"document clean {tag}", ip)
-    return _doc_reply("CLEAN", result, [], fields)
+    reply = _doc_reply("CLEAN", result, [], fields)
+    reply["stored"] = _save_to_vault(user_id, ip, fields, tag)
+    return reply
+
+
+# ---------- Quantum-safe vault: AI copies under each customer's own key ----------
+
+CUST_NO = re.compile(r"^\d{4}$")
+
+
+def _customer_visible(user_id: str, cust: str) -> bool:
+    """Db2 decides, as everywhere else: can THIS employee see this customer?"""
+    sql, params = build_query("get_customer", {"cust_id": int(cust)})
+    try:
+        return bool(db.run_as(user_id, sql, params))
+    except db.AccessDenied:
+        return False
+
+
+def _save_to_vault(user_id: str, ip, fields: list, tag: str) -> dict:
+    """Store ONLY the code-verified fields, and only for a customer this employee may see."""
+    if not vault_client.enabled():
+        return {"saved": False, "reason": "The encrypted vault is not switched on."}
+    ref = next((f["value"] for f in fields if f["name"] == "applicant_reference" and f["verified"]), "")
+    match = re.search(r"\b(\d{4})\b", ref)
+    if not match:
+        return {"saved": False, "reason": "No verified applicant reference in the document."}
+    cust = match.group(1)
+    if not _customer_visible(user_id, cust):
+        db.write_log(user_id, "vault_store", "BLOCK", None, f"customer {cust} not visible to employee {tag}", ip)
+        return {"saved": False, "customer": cust,
+                "reason": f"Not saved: Customer {cust} is not in the data you are allowed to see (Db2)."}
+    try:
+        out = vault_client.store(cust, {f["name"]: f["value"] for f in fields if f["verified"]}, tag, user_id)
+    except vault_client.VaultRefused as exc:
+        db.write_log(user_id, "vault_store", "BLOCK", None, f"customer {cust}: {exc.detail}"[:200], ip)
+        return {"saved": False, "customer": cust, "reason": f"Not saved: {exc.detail}."}
+    except vault_client.VaultUnavailable:
+        db.write_log(user_id, "vault_store", "ERROR", None, "vault unavailable", ip)
+        return {"saved": False, "customer": cust, "reason": "Not saved: the vault is not reachable right now."}
+    db.write_log(user_id, "vault_store", "ALLOW", 1,
+                 f"customer {cust} copy={out['copy_id']} retention={out['retention_class']} {tag}", ip)
+    return {"saved": True, "customer": cust, **{k: out[k] for k in (
+        "copy_id", "retention_class", "retention_days", "needs_review", "encryption", "key")}}
+
+
+class ForgetRequest(BaseModel):
+    identity_verified: bool
+    confirm: str = Field(max_length=20)
+
+
+class RemoveRequest(BaseModel):
+    reason: Literal["poisoned", "wrong_customer", "duplicate"]
+
+
+def _privacy_guard(user: dict, cust: str, action: str) -> tuple[str, str | None]:
+    """Managers only, and only for customers Db2 lets them see. Never through the AI."""
+    user_id, ip = user["sub"], user.get("_ip")
+    if not CUST_NO.match(cust):
+        raise HTTPException(400, "Customer must be a 4-digit number")
+    if auth.DIRECTORY.get(user_id, {}).get("role") != "MANAGER":
+        db.write_log(user_id, "privacy", "BLOCK", None, f"{action}: privacy actions need a manager", ip)
+        raise HTTPException(403, "Only a branch manager can do this.")
+    if not _customer_visible(user_id, cust):
+        db.write_log(user_id, "privacy", "BLOCK", None, f"{action}: customer {cust} not visible (Db2)", ip)
+        raise HTTPException(404, f"Customer {cust} is not in the data you are allowed to see.")
+    return user_id, ip
+
+
+def _vault_error(exc: Exception):
+    if isinstance(exc, vault_client.VaultRefused):
+        return HTTPException(409 if exc.status == 409 else 404 if exc.status == 404 else 400, exc.detail)
+    return HTTPException(503, "The vault is not reachable right now.")
+
+
+@app.get("/privacy/customers/{cust}")
+def privacy_view(cust: str, user: dict = Depends(current_user)):
+    user_id, ip = _privacy_guard(user, cust, "view")
+    try:
+        out = vault_client.copies(cust)
+    except (vault_client.VaultRefused, vault_client.VaultUnavailable) as exc:
+        raise _vault_error(exc) from None
+    db.write_log(user_id, "privacy_view", "ALLOW", len(out.get("copies", [])), f"customer {cust}", ip)
+    return out
+
+
+@app.post("/privacy/customers/{cust}/forget")
+def privacy_forget(cust: str, req: ForgetRequest, user: dict = Depends(current_user)):
+    user_id, ip = _privacy_guard(user, cust, "forget")
+    if req.confirm.strip().upper() != f"FORGET {cust}":
+        raise HTTPException(400, f"Type FORGET {cust} to confirm.")
+    if not req.identity_verified:
+        raise HTTPException(400, "Confirm that the customer's identity was verified in the branch.")
+    if _count(f"forget:{user_id}", 3600, add=True) > FORGETS_PER_MANAGER:
+        db.write_log(user_id, "vault_forget", "BLOCK", None, "too many erasures per hour", ip)
+        raise HTTPException(429, "Too many erasures in the last hour. Ask a second manager.")
+    try:
+        out = vault_client.forget(cust, user_id, True)
+    except (vault_client.VaultRefused, vault_client.VaultUnavailable) as exc:
+        db.write_log(user_id, "vault_forget", "BLOCK", None, f"customer {cust}: {exc}"[:200], ip)
+        raise _vault_error(exc) from None
+    held = out["status"] == "refused_legal_hold"
+    db.write_log(user_id, "vault_forget", "BLOCK" if held else "ALLOW", None,
+                 f"customer {cust} {out['request_id']} {out['status']}", ip)
+    return out
+
+
+@app.post("/privacy/customers/{cust}/copies/{copy_id}/remove")
+def privacy_remove(cust: str, copy_id: str, req: RemoveRequest, user: dict = Depends(current_user)):
+    user_id, ip = _privacy_guard(user, cust, "remove")
+    if not re.match(r"^[a-z-]{1,20}-[0-9a-f]{12}$", copy_id):
+        raise HTTPException(400, "Bad copy id")
+    try:
+        out = vault_client.remove(cust, copy_id, req.reason, user_id)
+    except (vault_client.VaultRefused, vault_client.VaultUnavailable) as exc:
+        db.write_log(user_id, "vault_remove", "BLOCK", None, f"customer {cust} {copy_id}: {exc}"[:200], ip)
+        raise _vault_error(exc) from None
+    db.write_log(user_id, "vault_remove", "ALLOW", None,
+                 f"customer {cust} {copy_id} reason={req.reason} {out['request_id']}", ip)
+    return out

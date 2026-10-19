@@ -28,6 +28,33 @@ function VerdictBadge({ verdict }: { verdict: DocResult["verdict"] }) {
   );
 }
 
+function StoredNote({ stored }: { stored: NonNullable<DocResult["stored"]> }) {
+  if (!stored.saved) {
+    return <p className="stored stored-no">{stored.reason}</p>;
+  }
+  const years = stored.retention_days ? Math.round(stored.retention_days / 365) : null;
+  return (
+    <div className="stored stored-yes" role="status">
+      <p className="stored-head">
+        <span aria-hidden="true">🔒</span> Saved to Customer {stored.customer}&apos;s encrypted file
+      </p>
+      <dl className="meta">
+        <div><dt>Key</dt><dd>{stored.key}</dd></div>
+        <div><dt>Encryption</dt><dd>{stored.encryption}</dd></div>
+        <div>
+          <dt>Keep for</dt>
+          <dd>
+            {years !== null && years >= 1 ? `${years} year${years === 1 ? "" : "s"}` : `${stored.retention_days} days`}
+            {stored.retention_class && ` (${stored.retention_class})`}
+            {stored.needs_review && " · flagged for human review"}
+          </dd>
+        </div>
+      </dl>
+      <p className="muted small">Only the verified values are stored. The AI gateway can store but never read them back.</p>
+    </div>
+  );
+}
+
 export function DocumentsPage() {
   const { session, signOut, touch } = useSession();
   const [file, setFile] = useState<File | null>(null);
@@ -162,6 +189,7 @@ export function DocumentsPage() {
                     </tbody>
                   </table>
                 </div>
+                {result.stored && <StoredNote stored={result.stored} />}
                 <details className="doc-details">
                   <summary>Show the document text</summary>
                   <pre className="doctext">{result.visible_text}</pre>

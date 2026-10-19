@@ -62,6 +62,8 @@ TITLES = {
     "LOGIN_THEN_PROBE": "Failed sign-ins followed by blocked requests",
     "BAD_TOKENS": "Forged or tampered sign-in tokens",
     "DOC_INJECTION": "Loan document with hidden AI instructions",
+    "MASS_ERASURE": "Many customer erasures or copy removals in a short time",
+    "PRIVACY_PROBE": "Non-manager tried customer privacy actions",
 }
 
 
@@ -177,6 +179,16 @@ def evaluate(events: list[Event], now: datetime) -> list[Finding]:
                 and e.reason.startswith("document quarantined")]
         if docs:
             found.append(_finding("DOC_INJECTION", "HIGH", subj, docs, documents=len(docs),
+                                  window_minutes=10))
+        # 13. Mass erasure: an insider could wipe AI records to hide something (10 min)
+        erasures = [e for e in evs if e.action in ("vault_forget", "vault_remove") and e.decision == "ALLOW"]
+        if len(erasures) >= 3:
+            found.append(_finding("MASS_ERASURE", "HIGH", subj, erasures, erasures=len(erasures),
+                                  window_minutes=10))
+        # 14. Privacy actions tried without the manager role (or for other branches' customers)
+        probes_p = [e for e in evs if e.action == "privacy" and e.decision == "BLOCK"]
+        if probes_p:
+            found.append(_finding("PRIVACY_PROBE", "MEDIUM", subj, probes_p, attempts=len(probes_p),
                                   window_minutes=10))
         # 8. Bulk reading: many allowed answers or many rows (scraping)
         allowed = [e for e in evs if e.decision == "ALLOW"]

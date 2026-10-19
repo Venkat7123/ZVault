@@ -28,3 +28,39 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
+
+  # ZVault quantum-safe vault (Phase C). Debian 13 image = OpenSSL 3.5 (ML-KEM, ML-DSA) on s390x.
+  # Listens on 127.0.0.1:8090 only (host network, like the gateway, but NOT published): only the
+  # gateway on this machine can reach it. Code is mounted read-only; keys and encrypted copies live
+  # in ~/zvault_data (chmod 700). Tokens come from ~/.zvault_env (never in the image or in Git).
+  vault:
+    build: ./vault
+    image: zvault-vault:latest
+    container_name: zvault-vault
+    network_mode: host
+    user: "${VAULT_UID:-1000}:${VAULT_GID:-1000}"
+    working_dir: /vault
+    command: ["python3", "service.py"]
+    env_file:
+      - ${ZVAULT_ENV_FILE:-/home/linux1/.zvault_env}
+    environment:
+      VAULT_BIND: 127.0.0.1
+      VAULT_PORT: "8090"
+      VAULT_DATA: /data
+      VAULT_MODELS: /vault/models
+    volumes:
+      - ./vault:/vault:ro
+      - ${ZVAULT_DATA_DIR:-/home/linux1/zvault_data}:/data
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request as u; u.urlopen('http://127.0.0.1:8090/health', timeout=4)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3

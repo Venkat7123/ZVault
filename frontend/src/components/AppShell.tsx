@@ -17,6 +17,7 @@ export function AppShell() {
         <nav aria-label="Main" className="nav">
           <NavLink to="/assistant">Assistant</NavLink>
           <NavLink to="/documents">Documents</NavLink>
+          {session?.user.role === "MANAGER" && <NavLink to="/privacy">Privacy</NavLink>}
           <NavLink to="/how-it-works">How it works</NavLink>
           <NavLink to="/limits">Limits</NavLink>
         </nav>

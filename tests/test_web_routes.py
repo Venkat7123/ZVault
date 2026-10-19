@@ -50,7 +50,7 @@ dist = ROOT / "botsbank" / "dist"
 assert (dist / "index.html").is_file(), "build the frontend first: cd frontend && npm run build"
 
 # ---- Pages: index.html ONLY for "/" and the four page routes ----
-for path in ("/", "/signin", "/assistant", "/documents", "/how-it-works", "/limits"):
+for path in ("/", "/signin", "/assistant", "/documents", "/privacy", "/how-it-works", "/limits"):
     r = client.get(path)
     check(f"GET {path} serves the app", r.status_code == 200 and "text/html" in r.headers["content-type"]
           and '<div id="root">' in r.text, r.status_code)

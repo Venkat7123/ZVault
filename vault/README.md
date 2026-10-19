@@ -36,12 +36,30 @@ Debian 13 container (OpenSSL 3.5.7 + Debian's pre-built packages). The code is m
 cd ~/botsbank-project/vault
 sudo docker build -t zvault-vault .
 RUN="sudo docker run --rm --network none --user $(id -u):$(id -g) -v $HOME/botsbank-project/vault:/vault zvault-vault"
-$RUN                              # 83 tests
+$RUN                              # 90 tests
 $RUN python3 train_qshelf.py      # train the retention model on this machine (+ fingerprint)
 $RUN python3 run_demo.py          # the full demo as a script
 ```
 Measured on z17: AES-256-GCM 1,776 MiB/s (CPACF), hybrid key wrap 4,756/s, ML-DSA-65 sign 604/s,
 erasure: inversion F1 0.915 -> 0.156 (noise 0.173), membership AUC 1.00 -> 0.58, no identifiers recovered.
+
+## As a service for the ZVault app
+`service.py` runs the vault as a small HTTP service on **127.0.0.1:8090** (never public). It is started
+by `docker-compose.yml` (service `vault`, read-only container, no capabilities, data in `~/zvault_data`).
+
+| Route | Token | What |
+|---|---|---|
+| `POST /v1/copies` | gateway | store one AI copy (verified fields) for a customer |
+| `GET /v1/customers/NNNN/copies` | gateway | list copies: metadata only, never content |
+| `POST /v1/customers/NNNN/forget` | gateway | destroy the customer key + recovery test + signed certificate |
+| `POST /v1/customers/NNNN/copies/ID/remove` | gateway | shred one copy (poisoned / wrong_customer / duplicate) + signed record |
+| `POST /v1/customers/NNNN/hold` | **auditor** | legal hold on/off (signed) |
+| `GET /v1/public`, `GET /health` | none | signer public key and log head; health |
+
+Secrets in `~/.zvault_env` (chmod 600): `VAULT_GATEWAY_TOKEN`, `VAULT_AUDITOR_TOKEN` (32+ chars each,
+different). Customer numbers are stored only as HMAC-SHA256 pseudonyms. Who may act is decided by the
+gateway with Db2 (see the main README); the vault itself trusts only its two tokens.
+`python3 jobs.py retention` shreds expired copies (run daily by `deploy/zvault-retention.timer`).
 
 ## Run anywhere else
 Requires **OpenSSL 3.5+** (first release with ML-KEM and ML-DSA) and Python 3.11+.
