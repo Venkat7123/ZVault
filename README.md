@@ -42,19 +42,35 @@ A CoreView vendor survey (2026) found 66% of IT leaders delayed or cancelled Cop
 ## Architecture
 
 ```mermaid
-flowchart TB
-  EMP["Bank staff"] -->|question + 15-min JWT| GW
+flowchart LR
+  EMP["Clerk / Manager<br/>(15-min token)"]
+  AUD["Auditor"]
   subgraph Z["IBM LinuxONE z17"]
-    subgraph GW["ZVault AI Gateway (FastAPI)"]
-      LLM["IBM Granite 3.3 2B<br/>picks ONE read-only tool"] --> GUARD["Guard rules<br/>block only"] --> SQL["Fixed parameterized SQL"]
+    direction TB
+    subgraph GW["ZVault AI Gateway"]
+      direction TB
+      SCAN["Document scan<br/>hidden text → quarantine"] --> LLM["IBM Granite 3.3 2B<br/>picks one read-only tool"]
+      LLM --> GUARD["Guard rules + fixed SQL"]
     end
-    SQL --> TC["Db2 trusted connection<br/>as the real employee"] --> RCAC["Row permissions + column masks"] --> DATA[("Customer data")]
-    GW -.-> LOG[("ACCESS_LOG")] --> ALERT["Anomaly engine + Granite alerts"]
-    GW --> VAULT[("Encrypted AI copies<br/>ML-KEM-768 + X25519 keys")]
-    VAULT --> CERT["Forget me → ML-DSA certificate<br/>transparency log"]
+    subgraph DB["Db2 12.1"]
+      direction TB
+      TC["Trusted connection<br/>as the real employee"] --> RCAC["Row permissions<br/>+ column masks"]
+      LOG[("ACCESS_LOG")]
+    end
+    subgraph VS["Vault service · OpenSSL 3.5"]
+      direction TB
+      VAULT[("AI copies, per-customer key<br/>ML-KEM-768 + X25519")] --> CERT["Forget → self-attack<br/>ML-DSA-65 certificate"]
+    end
+    ALERT["Alert engine"]
+    GUARD --> TC
+    GW -->|"store / forget<br/>cannot read"| VAULT
+    GW -.-> LOG --> ALERT
   end
-  RCAC -->|"allowed rows only (AI never sees them)"| EMP
-  ALERT --> AUD["Auditor"]
+  EMP -->|"question / PDF"| SCAN
+  RCAC -->|"allowed rows<br/>AI never sees them"| EMP
+  CERT -->|"certificate"| EMP
+  ALERT --> AUD
+  AUD -->|"legal hold"| VAULT
 ```
 
 ### Request flow
