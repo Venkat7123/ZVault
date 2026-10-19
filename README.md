@@ -310,7 +310,5 @@ RBI Master Direction on IT Governance 2023 (need-to-know) · RBI Cyber Security 
 [Debian 13 image](https://hub.docker.com/_/debian) ·
 Db2 Community Edition (free, not open source)
 
-## Team
-[Name 1] · [Name 2] · [Name 3]
 
 *All customers, staff and numbers are synthetic. Bots Bank is a fictional bank.*
