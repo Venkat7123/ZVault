@@ -6,7 +6,7 @@ IBM Z Datathon 2026 · Theme 2: *AI Secured: Innovation Without Exposure* · Dem
 
 🔗 **Live demo (running on IBM LinuxONE z17):** http://148.100.76.198:8000/
 
-> Demo login password: shared with the judges in the submission form (not stored in this repository).
+> Demo login password: vcc.20071VCC
 
 ---
 
